@@ -1,4 +1,12 @@
 python-dotenv
 langchain
 langchain_chroma
+langchain_core
+langchain_classic
+langchain_community
+langchain_groq
+langchain_huggingface
+pymupdf
+pypdf
+sentence-transformers
 streamlit
