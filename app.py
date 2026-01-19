@@ -14,55 +14,72 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_groq import ChatGroq
 from langchain_core.runnables.history import RunnableWithMessageHistory
 
-# Load Environment Variables
-load_dotenv()
-os.environ['HF_TOKEN']=os.getenv('HF_TOKEN')
+from langchain_classic.callbacks import StreamlitCallbackHandler
 
 
-############################################################################
+
+
+############################################################################ Heading
 
 st.title('PDF RAG Chatbot with Chat History')
 st.write("Upload PDFs and Ask Chatbot Questions")
 
-api_key=st.text_input("Enter your Groq API Key", type="password")
+############################################################################ Sidebar
 
-if api_key:
-    llm=ChatGroq(groq_api_key=api_key,model='llama-3.1-8b-instant')
+st.sidebar.title("Keys & Tokens")
+groq_api_key=st.sidebar.text_input("Enter your Groq API Key: ",type="password")
+hf_token=st.sidebar.text_input("Enter your HuggingFace Token: ",type="password")
 
 
-    session_id=st.text_input("Session ID", value="default_session")
+############################################################################ 
 
-    if 'store' not in st.session_state:
-        st.session_state.store={}
-
+if groq_api_key and hf_token:
+    llm=ChatGroq(groq_api_key=groq_api_key,model='llama-3.1-8b-instant')
     uploaded_files=st.file_uploader("Upload a PDF File", type="pdf",accept_multiple_files=True)
-
 
 ###########################################################################
 
 
+
+
+
     if uploaded_files:
-        documents=[]
-        for uploaded_file in uploaded_files:
-            temp_pdf=f"./temp.pdf"
-            with open(temp_pdf,"wb") as file:
-                file.write(uploaded_file.getvalue())
-                file_name=uploaded_file.name
 
-            pdf_loader = PyPDFLoader(temp_pdf)
-            docs=pdf_loader.load()
-            documents.extend(docs)
+        
+
+        st.session_state.session_id=st.text_input("Session ID", value="default_session")
 
 
+        def create_vector_embedding():
 
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=200)
-        chunks = text_splitter.split_documents(documents)
-        huggingface_embeddings = HuggingFaceEmbeddings(model='all-MiniLM-L6-v2')
-        vector_store = Chroma.from_documents(chunks,huggingface_embeddings)
-        retriever = vector_store.as_retriever()
+            if 'store' not in st.session_state:
+                st.session_state.store={} 
+
+            documents=[]
+            for uploaded_file in uploaded_files:
+                temp_pdf=f"./temp.pdf"
+                with open(temp_pdf,"wb") as file:
+                    file.write(uploaded_file.getvalue())
+
+                pdf_loader=PyPDFLoader(temp_pdf)
+                docs=pdf_loader.load()
+                documents.extend(docs)
+
+
+                text_splitter = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=200, separators=["\n\n", "\n", ".", " ", ""])
+                chunks = text_splitter.split_documents(documents)
+                huggingface_embeddings = HuggingFaceEmbeddings(model='all-MiniLM-L6-v2')
+                st.session_state.vector_store = Chroma.from_documents(chunks,huggingface_embeddings)
+                st.session_state.retriever = st.session_state.vector_store.as_retriever(search_kwargs={"k": 5})
+
+
+        if "vector_store" not in st.session_state:
+            with st.spinner("Loading documents..."):
+                create_vector_embedding()
 
 
 
+############################################################################################
 
         contextualised_q_system_prompt=(
             """
@@ -71,6 +88,8 @@ if api_key:
                 formulate a standalone question which can be understood
                 without the chat history.
 
+                CRITICAL: The standalone question MUST be in the same language as the user's latest question. 
+
                 Do NOT answer the question.
                 Just formulate it if needed.
                 Otherwise, return it as it is.
@@ -78,17 +97,14 @@ if api_key:
         )
 
 
-
         contextualised_q_prompt = ChatPromptTemplate.from_messages([
             ("system",contextualised_q_system_prompt),
             MessagesPlaceholder("chat_history"),
-            ("human", "{input}")
+            ("human", "{input}\n\n(Note: Please provide your answer in the same language I used for this question.)")
         ])
 
 
-        history_aware_retriever=create_history_aware_retriever(llm,retriever,contextualised_q_prompt)
-
-
+        history_aware_retriever=create_history_aware_retriever(llm,st.session_state.retriever,contextualised_q_prompt)
 
 
         # Q&A Prompt
@@ -119,9 +135,9 @@ if api_key:
 
 
         def get_session_history(session:str)->BaseChatMessageHistory:
-            if session_id not in st.session_state.store:
-                st.session_state.store[session_id]=ChatMessageHistory()
-            return st.session_state.store[session_id]
+            if st.session_state.session_id not in st.session_state.store:
+                st.session_state.store[st.session_state.session_id]=ChatMessageHistory()
+            return st.session_state.store[st.session_state.session_id]
         
 
         conversational_rag_chain=RunnableWithMessageHistory(
@@ -134,23 +150,40 @@ if api_key:
 
 
 
-        user_input = st.text_input("Enter your question:")
+        if "messages" not in st.session_state:
+            st.session_state["messages"]=[{
+                "role":"assistant",
+                "content":"Hi, ask me anything about your PDF!"
+            }]
+
+
+        for msg in st.session_state.messages:
+            st.chat_message(msg["role"]).write(msg["content"])
+
+        user_input = st.chat_input("Enter your question:")
 
         if user_input:
-            session_history=get_session_history(session_id)
-            response = conversational_rag_chain.invoke(
-                {"input":user_input},
-                config={
-                    "configurable":{"session_id":session_id}
-                }
-            )
-
-            st.write(st.session_state.store)
-            st.write("Assistant: ", response['answer'])
-            st.write("Chat History: ", session_history.messages)
 
 
-    else:
-        st.warning("Please enter your Groq API Key")
+            session_history=get_session_history(st.session_state.session_id)
+            st.session_state.messages.append({
+                    "role":"user",
+                    "content":user_input
+                })
+            st.chat_message("user").write(user_input)
 
 
+            with st.chat_message("assistant"):
+                
+                streamlit_callback=StreamlitCallbackHandler(st.container(),expand_new_thoughts=False)
+                response=conversational_rag_chain.invoke(
+                    {"input":user_input},
+                    config={
+                        "configurable":{"session_id":st.session_state.session_id}
+                    }
+                )
+                st.write(response['answer'])
+                st.session_state.messages.append({
+                    "role":"assistant",
+                    "content":response['answer']
+                })
